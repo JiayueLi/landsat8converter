@@ -1,0 +1,2 @@
+# landsat8converter
+This tool is designed to perform unit conversions on Landsat 8 images from calibrated radiance (the original DN value of raw images) into true reflectance, true radiance, and at-sensor temperature (TSensor), depending on the user’s preference. The tool also performs atmospheric correction using three well-known correction models: Apparent Reflectance, Dark Object Subtraction (DOS), and the COST model. 
