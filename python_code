@@ -1,0 +1,291 @@
+# Import module
+import arcpy,numpy,math
+
+# Get Solar Irradiance for different bands
+def getESUN(bandID):
+    # Data Source: http://www.gisagmaps.com/landsat-8-atco-guide/
+    ESUN2 = 2067.0
+    ESUN3 = 1893.0
+    ESUN4 = 1603.0 
+    ESUN5 = 972.6 
+    ESUN6 = 245.0
+    ESUN7 = 79.72 
+    ESUN9 = 399.7    
+   
+    if bandID == 2:
+        return ESUN2
+    elif bandID == 3:
+        return ESUN3
+    elif bandID == 4:
+        return ESUN4
+    elif bandID == 5:
+        return ESUN5
+    elif bandID == 6:
+        return ESUN6
+    elif bandID == 7:
+        return ESUN7
+    elif bandID == 9:
+        return ESUN9
+    else: 
+        print "getL-MAX-WithBand error"
+        return 0
+
+# Read Metadata (Radiance_Mult_Band,Radiance_Add_Band,Sun Elevation, Earth-Sun Distance)
+def ReadMetadata(Metadata):
+    # Open metadata using reading mode
+    f = open(Metadata,'r')
+
+    # Initialize two empty dictionaries to store RADIANCE_MULT_BAND and RADIANCE_ADD_BAND
+    dic_Radiance_Mult_Band = {}
+    dic_Radiance_Add_Band = {}
+
+    while 1:
+        line = f.readline()
+        for i in range(11):
+            # Save Gain and Offset in two dictionaries
+            if ('RADIANCE_MULT_BAND_'+ str(i+1)) in line:
+                dic_Radiance_Mult_Band['RADIANCE_MULT_BAND_'+str(i+1)]=line[27:-1]
+            if ('RADIANCE_ADD_BAND_'+ str(i+1)) in line:
+                dic_Radiance_Add_Band['RADIANCE_ADD_BAND_'+str(i+1)]=line[26:-1]
+        # Save sun elevation and earth-sun distance in two variables
+        if 'SUN_ELEVATION' in line:
+            SUN_ELEVATION = line[20:-1]
+        if 'EARTH_SUN_DISTANCE' in line:
+            Distance = line[25:-1]
+        # Jump out of the loop after reading all the data
+        if line == '':
+            break
+    return dic_Radiance_Mult_Band,dic_Radiance_Add_Band,SUN_ELEVATION,Distance
+
+# Find dark object in band 5 and return the coordinates of dark object
+def getDarkObject(Source_file):
+    # Revise the path to near infrared band
+    Source_file = Source_file[:-5]+'5.TIF'
+    array = arcpy.RasterToNumPyArray(Source_file)
+    # Shape function to get the row and column
+    row = array.shape[0]
+    column = array.shape[1]
+    # Initialize Haze value and a tuple to store coordinates for dark object
+    HAZE = 65535
+    HAZE_XY = (0,0)
+    # Find the lowest value in near infrared band and save the coordinates
+    for m in range(row):
+        for n in range(column):
+            if array[m][n] !=0 and array[m][n] < HAZE:
+                HAZE_XY = (m,n)
+    del array
+    return HAZE_XY
+
+# Covert DN value to top of atmosphere reflectance
+def ToTOAReflectance(Source_file,Output_file,SUN_ELEVATION):
+    # Gain and offset have fixed value for reflectance
+    REFLECTANCE_MULT = 2.0000E-05
+    REFLECTANCE_ADD = -0.100000
+    # Access Data Information
+    descData=arcpy.Describe(Source_file)
+    # Acquire spatial reference and cellsize
+    spatialReference=descData.spatialReference
+    cellSize=descData.meanCellHeight
+
+    # Save the coordinates to position the image    
+    pnt=arcpy.Point(descData.Extent.XMin,descData.Extent.YMin)
+    
+    array = arcpy.RasterToNumPyArray(Source_file)
+    array_output = numpy.empty(array.shape)
+    
+    # To TOA Reflectance calculation
+    for i in range(array.shape[-1]):    
+        array_output[...,i]= (float(REFLECTANCE_MULT)* array[...,i] + float(REFLECTANCE_ADD))\
+                      /(math.cos((90-float(SUN_ELEVATION))/360*2*math.pi))
+        
+    # Add spatial reference on the output
+    my_raster = arcpy.NumPyArrayToRaster(array_output,pnt,cellSize,cellSize)
+    arcpy.DefineProjection_management(my_raster,spatialReference)
+    
+    # Save the raster image
+    my_raster.save(Output_file)
+    del array
+    return Output_file
+
+# Convert DN value to top of atmosphere radiance    
+def ToTOARadiance(Source_file,Output_file,RADIANCE_MULT,RADIANCE_ADD):
+    # Access Data Information 
+    descData=arcpy.Describe(Source_file)
+    # Acquire spatial reference and cellsize
+    spatialReference=descData.spatialReference
+    cellSize=descData.meanCellHeight
+    # Save the coordinates to position the image
+    pnt=arcpy.Point(descData.Extent.XMin,descData.Extent.YMin)
+    
+    array = arcpy.RasterToNumPyArray(Source_file)
+    array_output = numpy.empty(array.shape)
+    
+    # To TOA Radiance calculation
+    for i in range(array.shape[-1]):    
+        array_output[...,i]= float(RADIANCE_MULT)* array[...,i] + float(RADIANCE_ADD)
+
+    # Add spatial reference on the output
+    my_raster = arcpy.NumPyArrayToRaster(array_output,pnt,cellSize,cellSize)
+    arcpy.DefineProjection_management(my_raster,spatialReference)
+
+    # Save the raster image
+    my_raster.save(Output_file)
+    del array
+    return Output_file
+
+# Convert DN value to at-sensors brightness temperature
+def ToAtSensorBrightnessTemperature(Source_file,Output_file,RADIANCE_MULT,RADIANCE_ADD,BandID):
+    # Parameters in the conversion
+    K1_CONSTANT_BAND_10 = 774.89
+    K1_CONSTANT_BAND_11 = 480.89
+    K2_CONSTANT_BAND_10 = 1321.08
+    K2_CONSTANT_BAND_11 = 1201.14
+
+    # Access Data Information   
+    descData=arcpy.Describe(Source_file)
+    # Acquire spatial reference and cellsize
+    spatialReference=descData.spatialReference
+    cellSize=descData.meanCellHeight
+    # Save the coordinates to position the image
+    pnt=arcpy.Point(descData.Extent.XMin,descData.Extent.YMin)
+    
+    array = arcpy.RasterToNumPyArray(Source_file)
+    array_output = numpy.empty(array.shape)
+    # Apparent reflectance atmospheric correction calculation
+    for i in range(array.shape[-1]):
+        if BandID == '10':
+            array_output[...,i]= K2_CONSTANT_BAND_10/numpy.log(K1_CONSTANT_BAND_10/(float(RADIANCE_MULT)* array[...,i] + float(RADIANCE_ADD))+1)-275
+        elif BandID == '11':
+            array_output[...,i]= K2_CONSTANT_BAND_11/numpy.log(K1_CONSTANT_BAND_11/(float(RADIANCE_MULT)* array[...,i] + float(RADIANCE_ADD))+1)-275
+
+    # Add spatial reference on the output
+    my_raster = arcpy.NumPyArrayToRaster(array_output,pnt,cellSize,cellSize)
+    arcpy.DefineProjection_management(my_raster,spatialReference)
+
+    # Save the raster image
+    my_raster.save(Output_file)
+    del array,array_output
+    return Output_file
+
+# Convert DN value to surface reflectance using apparaent reflectance method
+def ApparentReflectance(Source_file,Output_file,RADIANCE_MULT,RADIANCE_ADD,SUN_ELEVATION,ESUN,DISTANCE):
+    # Access Data Information
+    descData=arcpy.Describe(Source_file)
+    # Acquire spatial reference and cellsize
+    spatialReference=descData.spatialReference
+    cellSize=descData.meanCellHeight
+    # Save the coordinates to position the image
+    pnt=arcpy.Point(descData.Extent.XMin,descData.Extent.YMin)
+    
+    array = arcpy.RasterToNumPyArray(Source_file)
+    array_output = numpy.empty(array.shape)
+    # Apparent reflectance atmospheric correction calculation
+    for i in range(array.shape[-1]):
+        array_output[...,i]= (float(RADIANCE_MULT)* array[...,i] + float(RADIANCE_ADD))\
+                            * math.pi * (float(DISTANCE) ** 2)\
+                            / ESUN / (math.cos((90-float(SUN_ELEVATION))/360*2*math.pi))
+
+    # Add spatial reference on the output    
+    my_raster = arcpy.NumPyArrayToRaster(array_output,pnt,cellSize,cellSize)
+    arcpy.DefineProjection_management(my_raster,spatialReference)
+    
+    # Save the raster image
+    my_raster.save(Output_file)
+    del array,array_output    
+
+# Convert DN value to surface reflectance using DOS method       
+def DOS(Source_file,Output_file,RADIANCE_MULT,RADIANCE_ADD,SUN_ELEVATION,ESUN,HAZE_XY,DISTANCE):
+    # Access Data Information
+    descData=arcpy.Describe(Source_file)
+    # Acquire spatial reference and cellsize
+    spatialReference=descData.spatialReference
+    cellSize=descData.meanCellHeight
+    # Save the coordinates to position the image
+    pnt=arcpy.Point(descData.Extent.XMin,descData.Extent.YMin)
+    
+    array = arcpy.RasterToNumPyArray(Source_file)
+    array_output = numpy.empty(array.shape)
+    # DOS atmospheric correction calculation
+    for i in range(array.shape[-1]):
+        array_output[...,i]= ((float(RADIANCE_MULT)* array[...,i] + float(RADIANCE_ADD))\
+                              - (float(RADIANCE_MULT)* array[HAZE_XY[0]][HAZE_XY[1]] + float(RADIANCE_ADD))*0.99)\
+                              * math.pi * (float(DISTANCE) ** 2)\
+                              / ESUN / (math.cos((90-float(SUN_ELEVATION))/360*2*math.pi))
+
+    # Add spatial reference on the output     
+    my_raster = arcpy.NumPyArrayToRaster(array_output,pnt,cellSize,cellSize)
+    arcpy.DefineProjection_management(my_raster,spatialReference)
+    # Save the raster image
+    my_raster.save(Output_file)
+    del array,array_output
+
+# Convert DN value to surface reflectance using COST method    
+def COST(Source_file,Output_file,RADIANCE_MULT,RADIANCE_ADD,SUN_ELEVATION,ESUN,HAZE_XY,DISTANCE):
+    # Access Data Information
+    descData=arcpy.Describe(Source_file)
+    # Acquire spatial reference and cellsize
+    spatialReference=descData.spatialReference
+    cellSize=descData.meanCellHeight
+    # Save the coordinates to position the image
+    pnt=arcpy.Point(descData.Extent.XMin,descData.Extent.YMin)
+    
+    array = arcpy.RasterToNumPyArray(Source_file)
+    array_output = numpy.empty(array.shape)
+    # COST atmospheric correction calculation
+    for i in range(array.shape[-1]):
+        array_output[...,i]= ((float(RADIANCE_MULT)* array[...,i] + float(RADIANCE_ADD))\
+                              - (float(RADIANCE_MULT)* array[HAZE_XY[0]][HAZE_XY[1]] + float(RADIANCE_ADD))*0.99)\
+                              * math.pi * (float(DISTANCE) ** 2)\
+                              / ESUN / ((math.cos((90-float(SUN_ELEVATION))/360*2*math.pi))**2)
+    # Add spatial reference on the output
+    my_raster = arcpy.NumPyArrayToRaster(array_output,pnt,cellSize,cellSize)
+    arcpy.DefineProjection_management(my_raster,spatialReference)
+    # Save the raster image
+    my_raster.save(Output_file)
+    del array,array_output
+
+
+# Get parameter as text from user input
+Source_file = arcpy.GetParameterAsText(0) 
+Metadata = arcpy.GetParameterAsText(1)
+Conversion = arcpy.GetParameterAsText(2)
+AtmosphericCorrection = arcpy.GetParameterAsText(3)
+BandID = arcpy.GetParameterAsText(4)
+Output_file = arcpy.GetParameterAsText(5)
+
+# Set the basic parameters 
+dic_Radiance_Mult_Band = ReadMetadata(Metadata)[0]
+dic_Radiance_Add_Band = ReadMetadata(Metadata)[1]
+SUN_ELEVATION = ReadMetadata(Metadata)[2]
+DISTANCE = ReadMetadata(Metadata)[3]
+
+# According to user input, call different functions 
+if Conversion == '' or AtmosphericCorrection == '':
+    print 'Please choose a function'
+    
+if Conversion != '' and AtmosphericCorrection != '':
+    print 'You can just choose one function'
+
+if Conversion == 'To TOA Reflectance':
+    ToTOAReflectance(Source_file,Output_file,SUN_ELEVATION)
+    
+if Conversion == 'To TOA Radiance':
+    ToTOARadiance(Source_file,Output_file,dic_Radiance_Mult_Band['RADIANCE_MULT_BAND_'+BandID],dic_Radiance_Add_Band['RADIANCE_ADD_BAND_'+BandID])
+
+if Conversion == 'To At-Sensor Brightness Temperature':
+    ToAtSensorBrightnessTemperature(Source_file,Output_file,dic_Radiance_Mult_Band['RADIANCE_MULT_BAND_'+BandID],dic_Radiance_Add_Band['RADIANCE_ADD_BAND_'+BandID],BandID)
+
+if AtmosphericCorrection == 'COST':
+    HAZE_XY = getDarkObject(Source_file)
+    ESUN = getESUN(int(BandID))
+    COST(Source_file,Output_file,dic_Radiance_Mult_Band['RADIANCE_MULT_BAND_'+BandID],dic_Radiance_Add_Band['RADIANCE_ADD_BAND_'+BandID],SUN_ELEVATION,ESUN,HAZE_XY,DISTANCE)
+
+if AtmosphericCorrection == 'Apparent Reflectance':
+    ESUN = getESUN(int(BandID))
+    ApparentReflectance(Source_file,Output_file,dic_Radiance_Mult_Band['RADIANCE_MULT_BAND_'+BandID],dic_Radiance_Add_Band['RADIANCE_ADD_BAND_'+BandID],SUN_ELEVATION,ESUN,DISTANCE)
+        
+if AtmosphericCorrection == 'Dark Object Subtraction':
+    ESUN = getESUN(int(BandID))
+    HAZE_XY = getDarkObject(Source_file)
+    DOS(Source_file,Output_file,dic_Radiance_Mult_Band['RADIANCE_MULT_BAND_'+BandID],dic_Radiance_Add_Band['RADIANCE_ADD_BAND_'+BandID],SUN_ELEVATION,ESUN,HAZE_XY,DISTANCE)
+      
